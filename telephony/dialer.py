@@ -57,9 +57,10 @@ Notes:
 
 from config.settings import COMPLIANCE
 from datetime import datetime
+from typing import Optional
 
 
-def within_permitted_call_hours(now: datetime | None = None) -> bool:
+def within_permitted_call_hours(now: Optional[datetime] = None) -> bool:
     """Enforce the compliance calling window before dialing. Call this in the
     dialer BEFORE originating any outbound call."""
     now = now or datetime.now()

@@ -16,7 +16,6 @@ Flow of one turn:
 """
 
 import json
-from anthropic import Anthropic
 
 from config.settings import (
     ANTHROPIC_API_KEY, CLAUDE_MODEL, ACTIVE_LANGUAGE, COMPLIANCE,
@@ -43,6 +42,10 @@ class DialogueEngine:
             }
         Only the bank supplies real client data. The agent never invents it.
         """
+        # Imported lazily so EscalationRequired stays importable/testable
+        # without the anthropic package installed.
+        from anthropic import Anthropic
+
         self.flow = flow
         self.ctx = call_context
         self.script = SCRIPTS[flow][ACTIVE_LANGUAGE]
