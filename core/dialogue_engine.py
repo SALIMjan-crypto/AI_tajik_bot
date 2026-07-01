@@ -1,24 +1,32 @@
 """
 Dialogue engine — the "brain" of the voice agent.
 
-CTO note: This wraps Claude with a compliance guardrail. The design principle is
-that the model handles NATURAL CONVERSATION, but a deterministic layer around it
-enforces the rules. We never trust the model alone to remember a legal boundary —
-we structure the prompt from the audited config, and we run an escalation check
-on every recipient turn.
+CTO note: This wraps a locally-hosted open-source LLM (via Ollama) with a
+compliance guardrail. The design principle is that the model handles NATURAL
+CONVERSATION, but a deterministic layer around it enforces the rules. We never
+trust the model alone to remember a legal boundary — we structure the prompt
+from the audited config, and we run an escalation check on every recipient turn.
+
+Open-source stack, self-hosted, no third-party API calls with client data:
+  - LLM: any open-weight chat model served by Ollama (https://ollama.com),
+    e.g. "llama3.1:8b" or "qwen2.5:7b". Pull it once with
+    `ollama pull llama3.1:8b`, then `ollama serve` runs the local HTTP API
+    this module talks to. No API key, no data leaving the bank's network.
 
 Flow of one turn:
   1. Recipient says something (text now; transcribed speech later).
   2. Escalation check: does this turn trip a compliance trigger? If yes -> hand off.
-  3. If safe, Claude generates the next line, constrained by the system prompt
-     built from the approved script skeleton.
+  3. If safe, the model generates the next line, constrained by the system
+     prompt built from the approved script skeleton.
   4. Return the agent's line (text now; sent to TTS later).
 """
 
 import json
 
+import requests
+
 from config.settings import (
-    ANTHROPIC_API_KEY, CLAUDE_MODEL, ACTIVE_LANGUAGE, COMPLIANCE,
+    OLLAMA_HOST, OLLAMA_MODEL, ACTIVE_LANGUAGE, COMPLIANCE,
 )
 from config.scripts import SCRIPTS
 
@@ -42,10 +50,6 @@ class DialogueEngine:
             }
         Only the bank supplies real client data. The agent never invents it.
         """
-        # Imported lazily so EscalationRequired stays importable/testable
-        # without the anthropic package installed.
-        from anthropic import Anthropic
-
         self.flow = flow
         self.ctx = call_context
         self.script = SCRIPTS[flow][ACTIVE_LANGUAGE]
@@ -54,8 +58,19 @@ class DialogueEngine:
                 f"No script for flow='{flow}' language='{ACTIVE_LANGUAGE}'. "
                 f"Add and compliance-review the translation first."
             )
-        self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
         self.history = []   # list of {"role": "user"/"assistant", "content": ...}
+
+    # ------------------------------------------------------------------ #
+    # OLLAMA CALL — thin wrapper around the local /api/chat endpoint.
+    # ------------------------------------------------------------------ #
+    def _chat(self, messages: list) -> str:
+        resp = requests.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json().get("message", {}).get("content", "").strip()
 
     # ------------------------------------------------------------------ #
     # SYSTEM PROMPT — built from the audited config, not free-written.
@@ -74,7 +89,7 @@ class DialogueEngine:
 
         return f"""You are a professional, calm, and respectful automated voice assistant making an outbound phone call on behalf of a bank. You speak naturally, like a courteous human agent — never robotic, never aggressive, never pushy.
 
-REQUIRED OPENING (say this at the start, naturally): 
+REQUIRED OPENING (say this at the start, naturally):
 {fill(s['opening_disclosure'])}
 
 YOUR OBJECTIVE:
@@ -98,11 +113,14 @@ CLOSING (when the objective is met, say naturally):
 
     # ------------------------------------------------------------------ #
     # ESCALATION CHECK — runs on every recipient turn.
-    # Uses Claude as a fast classifier against the audited trigger list.
+    # Uses the same local model as a fast classifier against the audited
+    # trigger list. Smaller open-weight models are less reliable at strict
+    # JSON formatting than a frontier hosted model, so the fail-safe parse
+    # fallback below matters even more here.
     # ------------------------------------------------------------------ #
     def _check_escalation(self, recipient_text: str):
         triggers = ", ".join(COMPLIANCE.escalation_triggers)
-        prompt = f"""You are a compliance classifier for a bank collections/sales call. 
+        prompt = f"""You are a compliance classifier for a bank collections/sales call.
 Analyze this statement from the call recipient and decide if it trips any escalation trigger that requires handing the call to a human agent.
 
 Triggers to detect: {triggers}
@@ -112,12 +130,7 @@ Recipient said: "{recipient_text}"
 Respond with ONLY a JSON object, no other text:
 {{"escalate": true/false, "trigger": "<trigger name or empty>", "reason": "<brief explanation>"}}"""
 
-        resp = self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+        raw = self._chat([{"role": "user", "content": prompt}])
         raw = raw.replace("```json", "").replace("```", "").strip()
         try:
             verdict = json.loads(raw)
@@ -136,14 +149,12 @@ Respond with ONLY a JSON object, no other text:
     # ------------------------------------------------------------------ #
     def opening_line(self) -> str:
         """The agent speaks first. Generate the compliant opening."""
-        resp = self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=300,
-            system=self._system_prompt(),
-            messages=[{"role": "user",
-                       "content": "[CALL CONNECTED] Begin the call now with your required opening."}],
-        )
-        line = "".join(b.text for b in resp.content if b.type == "text").strip()
+        messages = [
+            {"role": "system", "content": self._system_prompt()},
+            {"role": "user",
+             "content": "[CALL CONNECTED] Begin the call now with your required opening."},
+        ]
+        line = self._chat(messages)
         self.history.append({"role": "user", "content": "[CALL CONNECTED]"})
         self.history.append({"role": "assistant", "content": line})
         return line
@@ -158,12 +169,7 @@ Respond with ONLY a JSON object, no other text:
 
         # 2. Safe — generate the next line in context.
         self.history.append({"role": "user", "content": recipient_text})
-        resp = self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=300,
-            system=self._system_prompt(),
-            messages=self.history,
-        )
-        line = "".join(b.text for b in resp.content if b.type == "text").strip()
+        messages = [{"role": "system", "content": self._system_prompt()}] + self.history
+        line = self._chat(messages)
         self.history.append({"role": "assistant", "content": line})
         return line

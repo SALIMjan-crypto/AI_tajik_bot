@@ -5,6 +5,9 @@ CTO note: Everything that a compliance officer or a non-engineer might need to
 review or change lives here — call hours, escalation triggers, disclosures,
 negotiation limits. Keep business rules OUT of the model prompt and IN this file
 so they can be audited and changed without touching AI behavior.
+
+This build uses a fully open-source, self-hosted stack: no per-call API key
+and no client data leaving the bank's own infrastructure.
 """
 
 import os
@@ -12,15 +15,30 @@ from dataclasses import dataclass, field
 from typing import List
 
 # ---------------------------------------------------------------------------
-# API KEYS — loaded from environment. Never hardcode. Never commit real keys.
-#   export ANTHROPIC_API_KEY="sk-ant-..."
-#   export ELEVENLABS_API_KEY="..."
+# LLM — served locally by Ollama (https://ollama.com). Install Ollama, then:
+#   ollama pull llama3.1:8b
+#   ollama serve
+# OLLAMA_HOST can point at a different box (e.g. a GPU server on the bank's
+# own network) via the environment; nothing here ever leaves that network.
 # ---------------------------------------------------------------------------
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 
-# Model selection
-CLAUDE_MODEL = "claude-sonnet-4-6"   # fast + capable; good for real-time dialogue
+# ---------------------------------------------------------------------------
+# VOICE — faster-whisper (STT) and Piper (TTS), both run locally. See
+# core/voice.py for setup notes.
+# ---------------------------------------------------------------------------
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")
+
+# Path to each language's Piper voice model (.onnx file; a matching
+# .onnx.json config must sit alongside it). Download from
+# https://huggingface.co/rhasspy/piper-voices. No Tajik voice ships yet —
+# see core/voice.py docstring for the fallback plan.
+PIPER_VOICE_PATHS = {
+    "en": os.environ.get("PIPER_VOICE_EN", ""),
+    "ru": os.environ.get("PIPER_VOICE_RU", ""),
+    "tg": os.environ.get("PIPER_VOICE_TG", ""),
+}
 
 # ---------------------------------------------------------------------------
 # LANGUAGE

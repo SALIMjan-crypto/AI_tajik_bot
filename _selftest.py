@@ -1,10 +1,12 @@
 """
-Offline self-test — proves the logic is wired correctly WITHOUT an API key.
+Offline self-test — proves the logic is wired correctly WITHOUT Ollama running,
+without any voice models downloaded, and without extra packages installed.
 
-This does not call Claude or ElevenLabs. It checks the parts that don't need
-a network call: config loads, script skeletons render for every supported
-language/flow, compliance triggers are intact, call logging writes a valid
-transcript, and the call-hours gate in the telephony scaffold behaves.
+This does not call the local LLM, faster-whisper, or Piper. It checks the
+parts that don't need those: config loads, script skeletons render for every
+supported language/flow, the full system prompt builds correctly, compliance
+triggers are intact, call logging writes a valid transcript, and the
+call-hours gate in the telephony scaffold behaves.
 
 Run:
     python _selftest.py
@@ -80,12 +82,27 @@ def main():
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # --- escalation exception shape ---------------------------------------
-    from core.dialogue_engine import EscalationRequired
+    from core.dialogue_engine import DialogueEngine, EscalationRequired
 
     try:
         raise EscalationRequired("hardship", "recipient said they lost their job")
     except EscalationRequired as e:
         ok &= check("EscalationRequired carries reason/detail", e.reason == "hardship" and bool(e.detail))
+
+    # --- dialogue engine builds without touching Ollama --------------------
+    # Constructing DialogueEngine and building its system prompt never makes
+    # a network call (only opening_line()/respond_to() do), so this proves
+    # the guardrail prompt assembles correctly with zero services running.
+    engine = DialogueEngine(flow=FLOW_COLLECTIONS, call_context=sample_ctx)
+    prompt = engine._system_prompt()
+    ok &= check(
+        "system prompt includes the required opening disclosure",
+        sample_ctx["bank_name"] in prompt and sample_ctx["client_name"] in prompt,
+    )
+    ok &= check(
+        "system prompt lists forbidden actions",
+        "NEVER" in prompt,
+    )
 
     # --- telephony call-hours gate -----------------------------------------
     from datetime import datetime
@@ -98,7 +115,7 @@ def main():
 
     print()
     if ok:
-        print("ALL CHECKS PASSED — logic is wired correctly. Add API keys to run for real.")
+        print("ALL CHECKS PASSED — logic is wired correctly. Start Ollama and pull a model to run for real.")
         return 0
     else:
         print("SOME CHECKS FAILED — see above.")
